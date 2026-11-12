@@ -8,6 +8,41 @@ import {authorizeManualRevision, buildChapterArtifactContentHash, ChapterArtifac
 import {assertNovelDirectorVersion, readRunExecutionEpoch} from "../../../../modules/novel/director-routing";
 import {initialScheduleByOrder,readInitialScheduleDocument} from "./planning/InitialScheduleDocument";
 
+/**
+ * 出场证据必须能在正文里找到，但不同模型给出的引用在标点、引号样式、截断位置
+ * 上差异很大（中文引号 vs 直引号、引用被截断只抄前半句）。逐字全等匹配会把
+ * 整章出场记录降级成 untracked。这里逐级放宽：空白归一的全量包含 → 去标点的
+ * 包含 → 前缀命中（容忍截断）。
+ */
+function normalizeEvidenceText(text: string | null | undefined): string {
+  return String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripEvidencePunctuation(text: string): string {
+  return normalizeEvidenceText(text).replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+function evidenceMatchesContent(content: string, evidence: string): boolean {
+  const normalizedEvidence = normalizeEvidenceText(evidence);
+  if (!normalizedEvidence) {
+    return false;
+  }
+  const normalizedContent = normalizeEvidenceText(content);
+  if (normalizedContent.includes(normalizedEvidence)) {
+    return true;
+  }
+  const strippedContent = stripEvidencePunctuation(normalizedContent);
+  const strippedEvidence = stripEvidencePunctuation(normalizedEvidence);
+  if (strippedEvidence && strippedContent.includes(strippedEvidence)) {
+    return true;
+  }
+  // 引用被截断：取前 60 个有效字符做前缀命中，至少要有 12 个有效字符才认。
+  const prefix = strippedEvidence.slice(0, 60);
+  return prefix.length >= 12 && strippedContent.includes(prefix);
+}
+
 export const CHARACTER_APPEARANCE_ARTIFACT = "director_v2_character_appearances:v1";
 const projectionSchema = z.object({schemaVersion: z.literal(1), records: z.array(characterAppearanceSchema),
   coverage: z.enum(["recorded", "untracked"])});
@@ -29,7 +64,7 @@ export async function writeCharacterAppearances(tx: Prisma.TransactionClient, in
   for (const item of input.appearances ?? []) {
     // Exact structured identities only. No name search in prose, alias guessing, or cross-book IDs.
     const matches = characters.filter(c => item.characterId ? c.id === item.characterId && c.name === item.characterName : c.name === item.characterName);
-    if (matches.length !== 1 || !input.content.replace(/\s+/g, " ").includes(item.evidence.replace(/\s+/g, " ").trim())) {
+    if (matches.length !== 1 || !evidenceMatchesContent(input.content, item.evidence)) {
       complete = false;
       continue;
     }
