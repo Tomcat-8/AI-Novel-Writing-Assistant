@@ -96,8 +96,21 @@ export class DirectorIssueService {
         }).then((result) => result.output).catch(() => null)
       : null;
 
+    // 2026-11-11：issue 分类模型不得把普通故障升级为安全锁定码。
+    // runtime.token_budget_exceeded 等锁定码一旦生效，界面会弹出「追加额度」弹窗，
+    // 而该弹窗的取值区间（min=10,000,001 / max=10,000,000）是空集，用户会被死锁。
+    const ASSESSMENT_BLOCKED_CODES = new Set([
+      "generation.output_unusable",
+      "quality.replan_required",
+      "runtime.token_budget_exceeded",
+      "runtime.protected_content",
+      "runtime.data_integrity",
+      "runtime.persistence_failed",
+    ]);
     const assessedCode = input.issueCode === "runtime.unclassified"
-      ? assessment?.issueCode ?? input.issueCode
+      ? assessment?.issueCode && !ASSESSMENT_BLOCKED_CODES.has(assessment.issueCode)
+        ? assessment.issueCode
+        : input.issueCode
       : input.issueCode;
     const maxAttempts = input.policy.maxAutomaticRetries;
     const occurrence = directorIssueOccurrenceSchema.parse({

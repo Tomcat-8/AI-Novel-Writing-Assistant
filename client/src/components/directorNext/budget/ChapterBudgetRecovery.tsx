@@ -19,7 +19,7 @@ export default function ChapterBudgetRecovery({budget, runId, novelId, expectedV
   const [deferred, setDeferred] = useState(false);
   const queries = useQueryClient();
   const minimum = Math.max(budget.tokenLimit, budget.usedTokens + budget.reserveTokens, applyToRemaining ? 16000 : 0) + 1;
-  const valid = limit.trim() !== "" && Number.isSafeInteger(Number(limit)) && Number(limit) >= minimum && Number(limit) <= 10_000_000;
+  const valid = limit.trim() !== "" && Number.isSafeInteger(Number(limit)) && Number(limit) >= minimum && Number(limit) <= 1_000_000_000;
   const updateLimit = (value: string) => {setLimit(value); setCommandKey(createDirectorCommandKey());};
   const mutation = useMutation({mutationFn: () => {
     if (!valid) throw new Error(`本章新上限至少为 ${format(minimum)} Tokens。`);
@@ -54,7 +54,7 @@ export default function ChapterBudgetRecovery({budget, runId, novelId, expectedV
       <p>原始累计 {format(budget.rawTokens)} Tokens；有效用量用于本章额度保护。</p>
     </div> : <p className="text-xs leading-5 text-muted-foreground">本任务按原始累计 Tokens 计量，历史用量保持原口径。</p>}
     <label className="block space-y-2 text-xs">本章新上限
-      <Input type="number" min={minimum} max={10_000_000} step={1} value={limit} disabled={busy}
+      <Input type="number" min={minimum} max={1_000_000_000} step={1} value={limit} disabled={busy}
         aria-invalid={!valid} onChange={event => updateLimit(event.target.value)}/>
     </label>
     <div className="flex flex-wrap items-center gap-2">

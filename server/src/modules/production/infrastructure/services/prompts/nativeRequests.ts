@@ -49,7 +49,7 @@ export function buildKernelPatchPromptRequest(input: ChapterPatchRepairInput) {
       reportOnly:styleIssues.filter(issue=>!isStyleIssueRewritable(issue)),protectedTerms,
       wholeChapterTouchedRatioMax:0.3,wholeChapterAddedRatioMax:0.05}) : undefined,
   },contextBlocks:repairContext ? buildChapterPatchRepairContextBlocks(repairContext,issuesJson) : undefined,
-  options:{provider:input.provider,model:input.model,temperature:Math.min(input.temperature ?? 0.35,0.45),maxTokens:4200,
+  options:{provider:input.provider,model:input.model,temperature:Math.min(input.temperature ?? 0.35,0.45),maxTokens:12_288,
     novelId:input.novelId,chapterId:input.chapterId,stage:"chapter_patch",triggerReason:input.repairMode ?? "patch_first"},
   };
 }
