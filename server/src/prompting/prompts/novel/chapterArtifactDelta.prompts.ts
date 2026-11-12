@@ -298,10 +298,419 @@ function normalizeSyncPlan(value: unknown): unknown {
   };
 }
 
-function normalizeArtifactDeltaOutput(value: unknown): unknown {
-  if (!isRecord(value)) return value;
+// 出场记录的 evidence/summary 在不同模型上可能是数组、别名键或超长文本，
+// 直接进 Schema 会报 "expected string, received array"，把整章资产抽取判失败，
+// 章节流水线随即暂停。这里统一归一化成字符串并按 Schema 上限截断。
+function normalizeAppearanceText(value: unknown, limit: number): string | undefined {
+  let text: unknown = value;
+  if (Array.isArray(value)) {
+    text = value
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (typeof item === "number" || typeof item === "boolean") return String(item);
+        return "";
+      })
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .join("；");
+  } else if (typeof value === "number" || typeof value === "boolean") {
+    text = String(value);
+  }
+  if (typeof text !== "string") {
+    return undefined;
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.length > limit ? trimmed.slice(0, limit) : trimmed;
+}
+
+const CHARACTER_APPEARANCE_KIND_ALIASES: Record<string, string> = {
+  present: "present",
+  出场: "present",
+  在场: "present",
+  实际出场: "present",
+  mention: "mention",
+  提及: "mention",
+  被提及: "mention",
+  转述: "mention",
+  flashback: "flashback",
+  回忆: "flashback",
+  dream: "dream",
+  梦: "dream",
+  梦境: "dream",
+};
+
+function normalizeCharacterAppearance(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const summary = normalizeAppearanceText(value.summary ?? value.appearanceSummary ?? value.note, 160);
+  const evidence = normalizeAppearanceText(value.evidence ?? value.quote ?? value.excerpt ?? value.text ?? value.citation, 350);
+  const characterName = normalizeAppearanceText(value.characterName ?? value.name, 100);
+  if (!summary || !evidence || !characterName) {
+    // 三要素缺一不可，缺了就丢掉这一条，而不是让整章抽取失败。
+    return undefined;
+  }
+  const rawKind = typeof value.kind === "string" ? value.kind.trim() : "";
+  const kind = CHARACTER_APPEARANCE_KIND_ALIASES[rawKind]
+    ?? CHARACTER_APPEARANCE_KIND_ALIASES[rawKind.toLowerCase()]
+    ?? "present";
   return {
     ...value,
+    characterId: normalizeAppearanceText(value.characterId, 100) ?? "",
+    characterName,
+    kind,
+    summary,
+    evidence,
+  };
+}
+
+// marker: normalizeArtifactDeltaShapeTolerantV3
+// 抽取结果的形状与必填项容错：模型对"证据"是字符串还是数组、是否给章节总览、
+// 是否给全必填项，理解并不一致。实测一次形状抖动就会让整章资产抽取失败、
+// 章节流水线随即暂停。这里在 Schema 校验之前统一归一化：
+//   1) 该是数组的给数组、该是字符串的给字符串；
+//   2) 必填项能由别名/上下文推出就推，推不出来就丢掉这一条子记录，
+//      绝不让一条不完整的子记录把整章抽取拖失败。
+function normalizeTextValue(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return undefined;
+}
+
+function readFirstText(record: unknown, keys: string[]): string | undefined {
+  if (!isRecord(record)) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const text = normalizeTextValue(record[key]);
+    if (text) {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function toTextArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => normalizeTextValue(item))
+      .filter((item): item is string => item !== undefined && item.length > 0);
+  }
+  const single = normalizeTextValue(value);
+  return single ? [single] : [];
+}
+
+function toRecordArray(value: unknown): unknown[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (isRecord(value)) {
+    return [value];
+  }
+  return undefined;
+}
+
+function toEvidenceItemArray(value: unknown): unknown[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (isRecord(value)) {
+    return [value];
+  }
+  const single = normalizeTextValue(value);
+  return single ? [single] : [];
+}
+
+const CHARACTER_RESOURCE_STATUS_BY_EVENT: Record<string, string> = {
+  introduced: "available",
+  acquired: "available",
+  revealed: "available",
+  used: "available",
+  recovered: "available",
+  create: "available",
+  created: "available",
+  craft: "available",
+  crafted: "available",
+  generate: "available",
+  generated: "available",
+  produce: "available",
+  produced: "available",
+  refine: "available",
+  refined: "available",
+  discover: "available",
+  discovered: "available",
+  expose: "available",
+  exposed: "available",
+  gain: "available",
+  gained: "available",
+  obtain: "available",
+  obtained: "available",
+  buy: "available",
+  bought: "available",
+  purchase: "available",
+  purchased: "available",
+  spend: "consumed",
+  spent: "consumed",
+  transferred: "transferred",
+  lost: "lost",
+  consumed: "consumed",
+  damaged: "damaged",
+  destroyed: "destroyed",
+  stale: "stale",
+  stale_marked: "stale",
+  hidden: "hidden",
+  borrowed: "borrowed",
+};
+
+const CHARACTER_RESOURCE_EVENT_TYPES = [
+  "introduced", "acquired", "revealed", "used", "transferred",
+  "lost", "consumed", "damaged", "destroyed", "recovered", "stale_marked",
+];
+const CHARACTER_RESOURCE_STATUS_TYPES = [
+  "available", "hidden", "borrowed", "transferred",
+  "lost", "consumed", "damaged", "destroyed", "stale",
+];
+const CHARACTER_MOVEMENT_TYPES = ["stay", "move", "reported", "uncertain"];
+const CHARACTER_TIME_CONTEXTS = ["present", "flashback", "dream", "plan", "hearsay"];
+const CHARACTER_CONTINUITY_STATUSES = ["consistent", "unexplained", "conflicting"];
+const PAYOFF_SCOPE_TYPES = ["book", "volume", "chapter"];
+const PAYOFF_STATUS_TYPES = ["setup", "hinted", "pending_payoff", "paid_off", "failed", "overdue"];
+
+function pickEnum(value: unknown, allowed: readonly string[]): string | undefined {
+  const text = normalizeTextValue(value);
+  if (!text) {
+    return undefined;
+  }
+  return allowed.includes(text) ? text : undefined;
+}
+
+function normalizeMindDeltaShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const evidence = toTextArray(value.evidence).map((item) => item.slice(0, 220)).slice(0, 3);
+  if (evidence.length === 0) {
+    return undefined;
+  }
+  // currentInterpretation 是必填项；模型有时用 delta/interpretation 等别名。
+  const currentInterpretation = readFirstText(value, [
+    "currentInterpretation", "delta", "interpretation", "currentReading",
+    "mindDelta", "reading", "mind",
+  ]);
+  const characterName = readFirstText(value, ["characterName", "name"]);
+  if (!currentInterpretation || !characterName) {
+    return undefined;
+  }
+  return {
+    ...value,
+    characterName,
+    currentInterpretation: currentInterpretation.slice(0, 360),
+    evidence,
+    misbeliefs: toTextArray(value.misbeliefs).map((item) => item.slice(0, 160)).slice(0, 4),
+    beliefs: toTextArray(value.beliefs).map((item) => item.slice(0, 160)).slice(0, 4),
+  };
+}
+
+function normalizeDialogueResolutionShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const evidence = toTextArray(value.evidence).map((item) => item.slice(0, 220)).slice(0, 3);
+  const status = normalizeTextValue(value.status);
+  const influenceId = readFirstText(value, ["influenceId", "id"]);
+  if (!influenceId) {
+    return undefined;
+  }
+  return {
+    ...value,
+    influenceId,
+    evidence,
+    // 没有证据就不能算"已承接"，降级为 defer，而不是让整章抽取失败。
+    status: status === "applied" && evidence.length === 0 ? "defer" : (status ?? "defer"),
+  };
+}
+
+function normalizeLocationDeltaShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const evidence = toTextArray(value.evidence).join("；").trim();
+  const characterName = readFirstText(value, ["characterName", "name"]);
+  const movementType = pickEnum(value.movementType, CHARACTER_MOVEMENT_TYPES);
+  const timeContext = pickEnum(value.timeContext, CHARACTER_TIME_CONTEXTS);
+  const continuityStatus = pickEnum(value.continuityStatus, CHARACTER_CONTINUITY_STATUSES);
+  // 位置变化缺证据就没有校验价值；枚举不合法也无法回填，直接丢掉这一条。
+  if (!evidence || !characterName || !movementType || !timeContext || !continuityStatus) {
+    return undefined;
+  }
+  const locationName = readFirstText(value, ["locationName", "location", "place"]);
+  return {
+    ...value,
+    characterName,
+    locationName: locationName ?? null,
+    movementType,
+    timeContext,
+    continuityStatus,
+    evidence,
+  };
+}
+
+function normalizeKnowledgeStateShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const characterName = readFirstText(value, ["characterName", "name"]);
+  if (!characterName) {
+    return undefined;
+  }
+  return {
+    ...value,
+    characterName,
+    knownFacts: toTextArray(value.knownFacts).slice(0, 5),
+    hiddenFacts: toTextArray(value.hiddenFacts).slice(0, 5),
+  };
+}
+
+function normalizeResourceDeltaShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const resourceName = readFirstText(value, ["resourceName", "name", "resource"]);
+  const updateType = pickEnum(
+    typeof value.updateType === "string" ? value.updateType.trim() : undefined,
+    CHARACTER_RESOURCE_EVENT_TYPES,
+  );
+  // statusAfter 是必填项；能从 updateType 推出来就推。
+  const statusAfter = pickEnum(value.statusAfter, CHARACTER_RESOURCE_STATUS_TYPES)
+    ?? CHARACTER_RESOURCE_STATUS_BY_EVENT[updateType ?? ""];
+  const narrativeImpact = readFirstText(value, [
+    "narrativeImpact", "impact", "consequence", "effect", "summary",
+  ]);
+  const evidence = toTextArray(value.evidence);
+  // 资源变化缺证据会被 postValidate（"资源变化缺少证据"）判失败，这里直接丢掉这一条。
+  if (!resourceName || !updateType || !statusAfter || !narrativeImpact || evidence.length === 0) {
+    return undefined;
+  }
+  return {
+    ...value,
+    resourceName,
+    updateType,
+    statusAfter,
+    narrativeImpact,
+    evidence,
+  };
+}
+
+function normalizePayoffDeltaShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const title = readFirstText(value, ["title", "name", "payoffTitle", "label"]);
+  // ledgerKey 是必填项；模型有时用 key/id，兜底用标题。
+  const ledgerKey = readFirstText(value, ["ledgerKey", "key", "id", "payoffKey", "ledgerId"]) ?? title;
+  const scopeType = pickEnum(value.scopeType, PAYOFF_SCOPE_TYPES);
+  const currentStatus = pickEnum(value.currentStatus, PAYOFF_STATUS_TYPES);
+  if (!title || !ledgerKey || !scopeType || !currentStatus) {
+    return undefined;
+  }
+  const evidence = toEvidenceItemArray(value.evidence);
+  // summary 是必填项；模型漏给时从证据文本或标题兜底。
+  const evidenceSummary = Array.isArray(evidence)
+    ? readFirstText(evidence.find((item) => isRecord(item)) ?? {}, ["summary"])
+    : undefined;
+  const summary = readFirstText(value, ["summary", "description", "text", "quote", "excerpt"])
+    ?? evidenceSummary
+    ?? title;
+  return {
+    ...value,
+    ledgerKey,
+    title,
+    summary,
+    scopeType,
+    currentStatus,
+    evidence: evidence === undefined ? undefined : evidence,
+  };
+}
+
+function normalizeFactionUpdateShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const characterName = readFirstText(value, ["characterName", "name"]);
+  const factionLabel = readFirstText(value, ["factionLabel", "faction", "label"]);
+  if (!characterName || !factionLabel) {
+    return undefined;
+  }
+  return { ...value, characterName, factionLabel };
+}
+
+function normalizeConcreteFactShape(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const text = readFirstText(value, ["text", "fact", "content"]);
+  if (!text) {
+    return undefined;
+  }
+  return { ...value, text };
+}
+
+function normalizeArtifactDeltaOutput(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const concreteFacts = (toRecordArray(value.concreteFacts) ?? [])
+    .map((item) => normalizeConcreteFactShape(item))
+    .filter((item): item is Record<string, unknown> => item !== undefined);
+  const summaryText = readFirstText(value, ["summary", "overview"])
+    ?? (concreteFacts.length > 0 ? concreteFacts[0]!.text : undefined)
+    ?? "（模型未提供章节总览）";
+  return {
+    ...value,
+    summary: summaryText,
+    concreteFacts,
+    stateDeltas: isRecord(value.stateDeltas) ? value.stateDeltas : {},
+    // 资源变化缺证据会被 postValidate 判失败，这里直接丢掉这一条。
+    characterResourceDeltas: (toRecordArray(value.characterResourceDeltas) ?? [])
+      .map((item) => normalizeResourceDeltaShape(item))
+      .filter((item): item is Record<string, unknown> => item !== undefined),
+    payoffDeltas: (toRecordArray(value.payoffDeltas) ?? [])
+      .map((item) => normalizePayoffDeltaShape(item))
+      .filter((item): item is Record<string, unknown> => item !== undefined),
+    relationDynamics: toRecordArray(value.relationDynamics) ?? [],
+    characterLocationDeltas: (toRecordArray(value.characterLocationDeltas) ?? [])
+      .map((item) => normalizeLocationDeltaShape(item))
+      .filter((item): item is Record<string, unknown> => item !== undefined),
+    factionUpdates: (toRecordArray(value.factionUpdates) ?? [])
+      .map((item) => normalizeFactionUpdateShape(item))
+      .filter((item): item is Record<string, unknown> => item !== undefined),
+    characterCandidates: toRecordArray(value.characterCandidates) ?? [],
+    characterAppearances: Array.isArray(value.characterAppearances)
+      ? value.characterAppearances
+          .map((item) => normalizeCharacterAppearance(item))
+          .filter((item): item is Record<string, unknown> => item !== undefined)
+      : value.characterAppearances,
+    characterKnowledgeStates: (toRecordArray(value.characterKnowledgeStates) ?? [])
+      .map((item) => normalizeKnowledgeStateShape(item))
+      .filter((item): item is Record<string, unknown> => item !== undefined),
+    // 心智变化要求至少一条证据 + 必填项，缺了就丢掉这一条。
+    characterMindDeltas: (toRecordArray(value.characterMindDeltas) ?? [])
+      .map((item) => normalizeMindDeltaShape(item))
+      .filter((item): item is Record<string, unknown> => item !== undefined),
+    characterDialogueInfluenceResolutions: (toRecordArray(value.characterDialogueInfluenceResolutions) ?? [])
+      .map((item) => normalizeDialogueResolutionShape(item))
+      .filter((item): item is Record<string, unknown> => item !== undefined),
     syncPlan: isRecord(value.syncPlan)
       ? value.syncPlan
       : { stateSnapshot: "write", characterResources: "write", payoffLedger: "delta", characterDynamics: "write", reason: "根据章节正文完成默认同步。" },

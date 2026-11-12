@@ -214,6 +214,69 @@ export class NovelPipelineExecutor {
     return parsePipelineJobPayload(payload);
   }
 
+  /**
+   * 顶部换全局模型后，让运行中的任务从「下一章」起换用新模型。
+   * 契约（DirectorNextRun.contractJson）是唯一事实来源：流水线会把自己
+   * 的 runtimePayload 回写进作业 payload，只改作业 payload 会被回写覆盖。
+   * 已经发出的请求不受影响 —— 调用方在章节边界才刷新。
+   */
+  private async refreshRuntimeModel(jobId: string, runtimePayload: PipelinePayload) {
+    try {
+      const runId = runtimePayload.directorNext?.runId;
+      let provider: string | undefined;
+      let model: string | undefined;
+      if (typeof runId === "string" && runId.trim()) {
+        const run = await prisma.directorNextRun.findUnique({
+          where: { id: runId },
+          select: { contractJson: true },
+        });
+        let contract: { modelConfig?: { route?: unknown; model?: unknown } } | null = null;
+        try {
+          contract = run?.contractJson
+            ? JSON.parse(run.contractJson) as { modelConfig?: { route?: unknown; model?: unknown } }
+            : null;
+        } catch {
+          contract = null;
+        }
+        const route = typeof contract?.modelConfig?.route === "string" ? contract.modelConfig.route.trim() : "";
+        const name = typeof contract?.modelConfig?.model === "string" ? contract.modelConfig.model.trim() : "";
+        if (route && name) {
+          provider = route;
+          model = name;
+        }
+      }
+      if (!provider || !model) {
+        const job = await prisma.generationJob.findUnique({
+          where: { id: jobId },
+          select: { payload: true },
+        });
+        const persisted = this.parsePipelinePayload(job?.payload);
+        if (persisted?.provider && persisted?.model) {
+          provider = persisted.provider;
+          model = persisted.model;
+        }
+      }
+      if (!provider || !model) {
+        return;
+      }
+      if (provider === runtimePayload.provider && model === runtimePayload.model) {
+        return;
+      }
+      const from = `${runtimePayload.provider}/${runtimePayload.model}`;
+      runtimePayload.provider = provider;
+      runtimePayload.model = model;
+      logPipelineInfo("运行中任务已切换模型", {
+        jobId,
+        runId: typeof runId === "string" ? runId : null,
+        from,
+        to: `${provider}/${model}`,
+      });
+    } catch (error) {
+      // 刷新失败不能中断生产：保留原模型继续跑。
+      console.warn("[pipeline] 刷新运行模型失败：", error instanceof Error ? error.message : error);
+    }
+  }
+
   execute(jobId: string, novelId: string, options: PipelineRunOptions, executionOwner?: string): Promise<void> {
     return this.executionOwnerStore.run(
       executionOwner?.trim() || null,
@@ -529,6 +592,8 @@ export class NovelPipelineExecutor {
         for (let chapterIndex = 0; chapterIndex < chaptersToProcess.length; chapterIndex++) {
           const chapter = chaptersToProcess[chapterIndex];
           await checkCancelled();
+          // 顶部换全局模型后，从这一章开始换用新模型（已发出的请求不受影响）。
+          await this.refreshRuntimeModel(jobId, runtimePayload);
 
           let chapterResult: Awaited<ReturnType<ChapterRuntimeCoordinator["runPipelineChapter"]>> | null = null;
           const savedUsage = runtimePayload.directorNext?.chapterUsage?.find(row => row.chapterId === chapter.id);

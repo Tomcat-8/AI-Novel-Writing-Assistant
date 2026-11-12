@@ -1,5 +1,9 @@
 import type { LLMProvider } from "@ai-novel/shared/types/llm";
 import { prisma } from "../../db/prisma";
+import {
+  syncRunningRunsToModel,
+  type DirectorRunModelSyncResult,
+} from "../novel/director/runtime/DirectorRunModelSyncService";
 
 const LLM_SELECTION_SETTING_KEY = "llm.currentSelection";
 const DEFAULT_TEMPERATURE = 0.7;
@@ -75,7 +79,9 @@ export async function getLLMSelectionSettings(): Promise<LLMSelectionSettings | 
   return record ? parseSelectionPayload(record.value) : null;
 }
 
-export async function saveLLMSelectionSettings(input: SaveLLMSelectionSettingsInput): Promise<LLMSelectionSettings> {
+export async function saveLLMSelectionSettings(
+  input: SaveLLMSelectionSettingsInput,
+): Promise<LLMSelectionSettings & { syncedRuns: DirectorRunModelSyncResult[] }> {
   const provider = normalizeProvider(input.provider);
   const model = normalizeModel(input.model);
   if (!provider || !model) {
@@ -93,5 +99,11 @@ export async function saveLLMSelectionSettings(input: SaveLLMSelectionSettingsIn
     update: { value: serializeSelection(settings) },
     create: { key: LLM_SELECTION_SETTING_KEY, value: serializeSelection(settings) },
   });
-  return settings;
+  // 顶部换模型后，正在运行的导演任务后续步骤要跟着换模型。
+  // 同时留存运行记录（model_switched 事件），提供运行条条相查。
+  const syncedRuns = await syncRunningRunsToModel(settings).catch((error: unknown) => {
+    console.warn("[director.model-sync] 同步运行中任务的模型失败：", error instanceof Error ? error.message : error);
+    return [] as DirectorRunModelSyncResult[];
+  });
+  return { ...settings, syncedRuns };
 }
