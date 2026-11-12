@@ -6,11 +6,11 @@ import type {
 
 export const DIRECTOR_CIRCUIT_BREAKER_THRESHOLDS = {
   modelFailureOpenAt: 3,
-  // A chapter with one normal repair cycle costs ~55-60k tokens (write + accept×2 + patch
-  // + timeline + artifact_delta). 80k allows up to two repair cycles before triggering.
-  // Anything beyond two repairs per chapter is genuinely abnormal and warrants a pause.
-  chapterTotalTokenLimit: 80_000,
-  singleStepTotalTokenLimit: 150_000,
+  // 2026-11-11 实测放定：本机每章实际用量 186k~348k tokens（12 次调用），
+  // 原来 80k 是按「一章 55~60k」标的，正常章节也会误触发熔断。
+  // 新门槛：仍能截住真 runaway（百万 tokens 级的异常消耗），但不会误伤正常章节。
+  chapterTotalTokenLimit: 800_000,
+  singleStepTotalTokenLimit: 600_000,
   usageAnomalyOpenAt: 2,
 } as const;
 

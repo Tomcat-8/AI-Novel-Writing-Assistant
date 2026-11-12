@@ -236,46 +236,111 @@ function startWorkspaceManagedServer(port: number): ManagedDesktopProcess {
 }
 
 function startPackagedManagedServer(port: number): ManagedDesktopProcess {
-  const child = utilityProcess.fork(resolvePackagedServerEntry(), [], {
-    cwd: resolveDesktopResourcesDir(),
-    env: {
-      ...process.env,
-      NODE_ENV: "production",
-      AI_NOVEL_RUNTIME: "desktop",
-      DIRECTOR_NEXT_ENABLED: process.env.DIRECTOR_NEXT_ENABLED ?? "true",
-      AI_NOVEL_DESKTOP_PACKAGED: "true",
-      AI_NOVEL_APP_DATA_DIR: resolveDesktopAppDataDir(),
-      AI_NOVEL_DATABASE_MODE: "sqlite",
-      DATABASE_URL: DESKTOP_SQLITE_DATABASE_URL,
-      PORT: String(port),
-      HOST: "127.0.0.1",
-      ALLOW_LAN: "false",
-    },
-    stdio: "pipe",
-    serviceName: "AI Novel Local Server",
-  });
-
+  // DESKTOP_SERVER_AUTORESTART：服务端进程崩溃后自动在同一端口重拉。
+  // 原实现只记录一行日志就结束，后端随之消失，客户端持续报「网络连接失败」，
+  // 只能人工重启整个 App。重拉保持端口不变，渲染端无需任何改动即可自动恢复。
+  let child: ReturnType<typeof utilityProcess.fork> | null = null;
   let hasExited = false;
-  child.on("spawn", () => {
-    appendDesktopLog("desktop.server.process", `Packaged desktop server spawned with pid=${child.pid ?? "unknown"}.`);
-  });
-  child.on("error", (error) => {
-    logDesktopError("desktop.server.process", error);
-  });
-  child.on("exit", (code) => {
-    hasExited = true;
+  let stopping = false;
+  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let restartAttempts = 0;
+
+  const spawnServer = () => {
+    child = utilityProcess.fork(resolvePackagedServerEntry(), [], {
+      cwd: resolveDesktopResourcesDir(),
+      env: {
+        ...process.env,
+        NODE_ENV: "production",
+        AI_NOVEL_RUNTIME: "desktop",
+        DIRECTOR_NEXT_ENABLED: process.env.DIRECTOR_NEXT_ENABLED ?? "true",
+        AI_NOVEL_DESKTOP_PACKAGED: "true",
+        AI_NOVEL_APP_DATA_DIR: resolveDesktopAppDataDir(),
+        AI_NOVEL_DATABASE_MODE: "sqlite",
+        DATABASE_URL: DESKTOP_SQLITE_DATABASE_URL,
+        PORT: String(port),
+        HOST: "127.0.0.1",
+        ALLOW_LAN: "false",
+      },
+      stdio: "pipe",
+      serviceName: "AI Novel Local Server",
+    });
+
+    hasExited = false;
+    child.on("spawn", () => {
+      appendDesktopLog("desktop.server.process", `Packaged desktop server spawned with pid=${child?.pid ?? "unknown"}.`);
+    });
+    child.on("error", (error) => {
+      logDesktopError("desktop.server.process", error);
+    });
+    child.on("exit", (code) => {
+      hasExited = true;
+      appendDesktopLog(
+        "desktop.server.process",
+        `Packaged desktop server exited with code=${code}.`,
+        code === 0 ? "info" : "warn",
+      );
+      if (!stopping) {
+        scheduleRestart(code);
+      }
+    });
+    appendProcessOutput(child.stdout, "desktop.server.stdout", "info");
+    appendProcessOutput(child.stderr, "desktop.server.stderr", "error");
+    return child;
+  };
+
+  const scheduleRestart = (code: number | null) => {
+    if (restartTimer) {
+      return;
+    }
+    restartAttempts += 1;
+    const delayMs = Math.min(30_000, 2_000 * restartAttempts);
     appendDesktopLog(
       "desktop.server.process",
-      `Packaged desktop server exited with code=${code}.`,
-      code === 0 ? "info" : "warn",
+      `Packaged desktop server exited unexpectedly (code=${code}); restarting in ${delayMs}ms.`,
+      "warn",
     );
-  });
-  appendProcessOutput(child.stdout, "desktop.server.stdout", "info");
-  appendProcessOutput(child.stderr, "desktop.server.stderr", "error");
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      if (stopping) {
+        return;
+      }
+      try {
+        spawnServer();
+        void waitForServerHealth(port, 60_000).then(() => {
+          restartAttempts = 0;
+          appendDesktopLog(
+            "desktop.server.process",
+            `Packaged desktop server restarted and healthy at http://127.0.0.1:${port}/api/health.`,
+            "info",
+          );
+        }).catch((error) => {
+          appendDesktopLog(
+            "desktop.server.process",
+            `Packaged desktop server restart health check failed: ${error instanceof Error ? error.message : String(error)}`,
+            "warn",
+          );
+        });
+      }
+      catch (error) {
+        logDesktopError("desktop.server.process", error);
+      }
+    }, delayMs);
+  };
+
+  spawnServer();
 
   return {
     hasExited: () => hasExited,
-    stop: async () => stopUtilityChildProcess(child),
+    stop: async () => {
+      stopping = true;
+      if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+      }
+      if (child) {
+        await stopUtilityChildProcess(child);
+      }
+    },
   };
 }
 

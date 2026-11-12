@@ -74,6 +74,44 @@ import { DirectorWorker } from "./workers/directorWorker";
 import { cleanupLogDirectory, resolveLogRetentionConfig } from "./platform/logging/logRetention";
 import { resolveLogsRoot } from "./runtime/appPaths";
 
+// GUARD_UNCAUGHT_FATAL：服务端进程兜底。
+// 远端长连接被主动断开时，undici 会在 AbortController.abort() 路径上额外抛出一个
+// 无人接管的 rejected promise；Node 22 对未处理 rejection 的默认行为是终止进程
+// （exit code=1），于是桌面端失去后端、客户端持续报「网络连接失败」。
+// 这里统一接管：写 stderr 日志但不退出，让请求层按各自的失败路径收束。
+const __AI_NOVEL_FATAL_GUARD__ = (() => {
+  const describe = (error: unknown): string => {
+    try {
+      if (error instanceof Error) {
+        return `${error.name}: ${error.message}\n${error.stack ?? ""}`;
+      }
+      if (typeof error === "string") {
+        return error;
+      }
+      return JSON.stringify(error);
+    }
+    catch {
+      return String(error);
+    }
+  };
+  const report = (kind: string, error: unknown): void => {
+    try {
+      console.error(`[server.guard] ${kind}: ${describe(error)}`);
+    }
+    catch {
+      // 兜底本身绝不能抛
+    }
+  };
+  process.on("uncaughtException", (error) => {
+    report("uncaughtException", error);
+  });
+  process.on("unhandledRejection", (reason) => {
+    report("unhandledRejection", reason);
+  });
+  return true;
+})();
+
+
 getSharedNovelServices();
 registerNovelEventHandlers(novelEventBus);
 const novelPipelineRuntimeService = new NovelPipelineRuntimeService();

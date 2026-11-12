@@ -24,7 +24,8 @@ export async function readKernelPausedChapterBudget(db: KernelBudgetReader, cont
   if (!record || record.version !== 1 || record.runId !== contract.runId || record.requestKey !== blocked[0].contentHash
     || !Number.isSafeInteger(record.tokens) || record.tokens < 1) throw new Error("章节预算暂停记录损坏，请检查运行记录。");
   const budget = await readKernelChapterBudget(db,contract,unit);
-  const recommendedLimit = Math.min(10_000_000,Math.ceil((Math.max(budget.limit,budget.used + record.tokens)+16_000)/1000)*1000);
+  const recommendedLimit = Math.min(1_000_000_000,Math.max(budget.limit + 1,
+    Math.ceil((Math.max(budget.limit,budget.used + record.tokens)+16_000)/1000)*1000));
   return {jobId:run.id,chapterId:unit.chapterId,chapterOrder:unit.order,metric:budget.metric,
     usedTokens:budget.used,rawTokens:budget.rawTokens,promptTokens:budget.promptTokens,completionTokens:budget.completionTokens,
     cacheHitTokens:budget.cacheHitTokens,unclassifiedTokens:budget.unclassifiedTokens,tokenLimit:budget.limit,

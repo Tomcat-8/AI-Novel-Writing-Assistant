@@ -360,7 +360,7 @@ async function invokeStructuredAttempt<T>(input: {
       taskType: input.baseInput.taskType,
       requestProtocol: resolved.requestProtocol,
       label: input.baseInput.label,
-      maxRepairAttempts: input.baseInput.maxRepairAttempts ?? 1,
+      maxRepairAttempts: input.baseInput.maxRepairAttempts ?? 3,
       repairGuidance: input.baseInput.repairGuidance,
       promptMeta: input.baseInput.promptMeta,
       repairMessages: currentModelRequestBudget() ? messages : undefined,

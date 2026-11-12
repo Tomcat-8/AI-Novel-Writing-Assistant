@@ -52,15 +52,26 @@ export class ChapterArtifactCheckpointStore {
       }
       let retryMetadata = metadata;
       if (existing.status === "failed") {
+        // 失败检查点必须能重新认领重跑。
+        // 章节资产抽取失败是概率事件（模型输出不可用、余额不足、网络抖动），
+        // 真正的重试上限由调用方（导演自动重试预算）控制。
+        // 这里返回 already_done 会让整章永久卡死：作者手动点"从保存进度继续"
+        // 也救不回来——失败检查点里根本没有可解析的抽取结果，readExtraction
+        // 会抛"章节资产抽取检查点版本不受支持。"。
+        // 超过上限只重置计数，不阻断重跑。
+        let failedMetadata: Record<string, unknown> = {};
         try {
-          const metadata = existing.metadataJson ? JSON.parse(existing.metadataJson) as Record<string, unknown> : {};
-          if (Number(metadata.attemptCount ?? 0) >= MAX_FAILED_ATTEMPTS) {
-            return "already_done";
-          }
-          retryMetadata = { ...metadata, ...retryMetadata, attemptCount: Number(metadata.attemptCount ?? 0) + 1 };
+          failedMetadata = existing.metadataJson ? JSON.parse(existing.metadataJson) as Record<string, unknown> : {};
         } catch {
-          return "already_done";
+          failedMetadata = {};
         }
+        const attemptCount = Number(failedMetadata.attemptCount ?? 0);
+        retryMetadata = {
+          ...failedMetadata,
+          ...retryMetadata,
+          attemptCount: attemptCount >= MAX_FAILED_ATTEMPTS ? 1 : attemptCount + 1,
+          reason: undefined,
+        };
       }
       const staleBefore = new Date(Date.now() - RUNNING_STALE_MS);
       if (existing.status === "running" && existing.updatedAt > staleBefore) {

@@ -349,7 +349,7 @@ export class ChapterWritingGraph {
         model: input.options.model,
         temperature: input.options.temperature ?? 0.8,
         reasoningEnabled: false,
-        maxTokens: 6000,
+        maxTokens: 12_288,
         novelId: input.novelId,
         chapterId: input.chapter.id,
         stage: "writer_draft",

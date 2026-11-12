@@ -11,8 +11,9 @@ export function chapterBudgetView(jobId: string, row: Checkpoint): DirectorChapt
     ?? (row.endJobTokens === undefined ? DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS : 0);
   const tokenLimit = row.tokenLimit ?? DIRECTOR_CHAPTER_TOKEN_LIMIT;
   // Cover the next step and one conservative fallback step, rounded for an editable recommendation.
-  const recommendedLimit = Math.min(10_000_000,
-    Math.ceil((Math.max(tokenLimit, usedTokens + reserveTokens) + DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS) / 1000) * 1000);
+  // 提示额度必须高于当前上限，否则客户端预填的值无效，弹窗会锁死。
+  const recommendedLimit = Math.min(1_000_000_000,
+    Math.max(tokenLimit + 1, Math.ceil((Math.max(tokenLimit, usedTokens + reserveTokens) + DIRECTOR_CHAPTER_PREFLIGHT_RESERVE_TOKENS) / 1000) * 1000));
   return {jobId, chapterId: row.chapterId, chapterOrder: row.chapterOrder,
     metric: row.metric ?? "raw_tokens_v1", usedTokens, rawTokens: row.totalTokens,
     ...(row.metric ? {promptTokens: row.promptTokens, completionTokens: row.completionTokens, cacheHitTokens: row.cacheHitTokens,
@@ -33,12 +34,12 @@ export function readPausedChapterBudget(snapshot: PipelineDirectorSnapshot, jobI
 
 export function authorizeChapterBudget(snapshot: PipelineDirectorSnapshot, jobId: string, grant: DirectorChapterBudgetGrant): void {
   if (grant.applyToRemaining && !directorChapterTokenLimitSchema.safeParse(grant.tokenLimit).success) {
-    throw new Error("后续章节上限须为 16,001 至 10,000,000 之间的整数。");
+    throw new Error("后续章节上限须为 16,001 至 1,000,000,000 之间的整数。");
   }
   const view = readPausedChapterBudget(snapshot, jobId);
   if (!view || grant.jobId !== jobId || grant.chapterId !== view.chapterId) throw new Error("预算授权与暂停章节不一致，请刷新后重试。");
   if (grant.metric !== view.metric) throw new Error("预算计量口径发生变化，请刷新后重试。");
-  if (!Number.isSafeInteger(grant.tokenLimit) || grant.tokenLimit > 10_000_000
+  if (!Number.isSafeInteger(grant.tokenLimit) || grant.tokenLimit > 1_000_000_000
     || grant.tokenLimit <= view.tokenLimit || grant.tokenLimit <= view.usedTokens + view.reserveTokens) {
     throw new Error("本章额度须高于已用量、下一步预留及当前上限。");
   }
