@@ -6,6 +6,12 @@ export interface ChapterArtifactSyncResult {
   completedArtifacts: string[];
   reason?: string;
   characterReviewId?: string;
+  /**
+   * 失败类别（如 "malformed_json" / "empty_response"）。
+   * 上层据此区分"模型输出不可用"（概率性故障，可自动重试）
+   * 与"数据完整性风险"（必须挂起等人工）。
+   */
+  failureCategory?: string | null;
 }
 
 export function mergeChapterArtifactSyncResults(
@@ -25,6 +31,7 @@ export function mergeChapterArtifactSyncResults(
     completedArtifacts: [...new Set(results.flatMap((result) => result.completedArtifacts))],
     reason: results.find((result) => result.status === status)?.reason,
     characterReviewId: results.find(result => result.characterReviewId)?.characterReviewId,
+    failureCategory: results.find((result) => result.failureCategory)?.failureCategory ?? null,
   };
 }
 

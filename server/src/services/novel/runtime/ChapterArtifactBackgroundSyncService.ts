@@ -23,6 +23,7 @@ import {
   CharacterCandidateReviewRequiredError,
   type ChapterArtifactSyncResult,
 } from "./artifactSync/ChapterArtifactSyncResult";
+import { modelOutputFailureCategory } from "../../../modules/production/common/structuredErrors";
 
 interface ChapterBackgroundSyncContext {
   chapterId: string;
@@ -119,6 +120,7 @@ export class ChapterArtifactBackgroundSyncService {
         contentHash,
         completedArtifacts: [],
         reason: error instanceof Error ? error.message : String(error),
+        failureCategory: modelOutputFailureCategory(error),
       }));
       if (result.status === "completed" || result.status === "degraded") {
         try {
@@ -278,6 +280,9 @@ export class ChapterArtifactBackgroundSyncService {
             contentHash,
             completedArtifacts: [],
             reason: error instanceof Error ? error.message : String(error),
+            // 把失败类别带出去：上层据此区分"模型输出不可用"（可自动重试）
+            // 和"数据完整性风险"（必须挂起等人工）。
+            failureCategory: modelOutputFailureCategory(error),
           };
         }
         await this.markCheckpoint({

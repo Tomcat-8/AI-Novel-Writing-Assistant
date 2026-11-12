@@ -48,6 +48,9 @@ import {
   resolvePipelineRuntimeIssueCode,
 } from "./issueGovernance/PipelineIssueGovernance";
 import {
+  isModelOutputFailure,
+} from "../../../modules/production/common/structuredErrors";
+import {
   buildPipelineCurrentItemLabel,
   buildPipelineStageProgress,
   parsePipelinePayload as parsePipelineJobPayload,
@@ -56,6 +59,15 @@ import {
 } from "../pipelineJobState";
 
 const PIPELINE_HEARTBEAT_INTERVAL_MS = 15000;
+
+/**
+ * 模型输出不可用的独立自动重试预算。
+ *
+ * 这类失败是概率性的（模型这次没给出可用输出），章节正文并没有落库，
+ * 重试安全且往往一次就能成功，因此不复用全局策略里被卡到 1 次的通用额度，
+ * 而是给它一条更宽松的通道，耗尽后才升级为"暂停等人工"。
+ */
+const MODEL_OUTPUT_RETRY_BUDGET = 3;
 
 class PipelineIssueAppliedError extends Error {
   constructor(
@@ -705,6 +717,9 @@ export class NovelPipelineExecutor {
           const chapterRetryBudget = Math.min(runtimePayload.maxRetries ?? maxRetries,
             issueGovernance?.policy.maxAutomaticRetries ?? maxRetries);
           let chapterRetryCountUsed = 0;
+          // 模型输出不可用的独立重试计数：不占用数据库里的一次性自动处理额度，
+          // 因为这类失败是概率性的，正文并没有落库，重试安全。
+          let modelOutputRetryCountUsed = 0;
           let previouslyConsumed = 0;
           const claimAttempt = async (kind: "quality_repair" | "runtime_retry") => {
             await checkCancelled();
@@ -792,7 +807,11 @@ export class NovelPipelineExecutor {
                     error: error.message, payload: this.stringifyPipelinePayload(runtimePayload)});
                   throw new PipelineIssueAppliedError(error.message, "pause_for_manual");
                 }
-                if (runtimePayload.directorNext && error instanceof ChapterArtifactSyncBoundaryError) {
+                // 资产同步边界错误如果根因是"模型输出不可用"，不要升级成 runtime.data_integrity
+                // （那个码的默认动作就是挂起等人工）。正文定稿记录还在，重试只会重跑资产同步，
+                // 不会重写正文（director_v2 走 resumeFinalizedPipelineChapter）。
+                if (runtimePayload.directorNext && error instanceof ChapterArtifactSyncBoundaryError
+                  && !isModelOutputFailure(error)) {
                   throw new PipelineIssueFailure(error.message, "runtime.data_integrity", "chapter_artifact_sync", chapter.id, chapter.order);
                 }
                 if (error instanceof PipelineIssueFailure && error.stage === "chapter_usage") throw error;
@@ -803,9 +822,14 @@ export class NovelPipelineExecutor {
                   throw error;
                 }
                 const message = error instanceof Error ? error.message : `第${chapter.order}章运行失败。`;
+                // 模型作答了但输出不可用：概率性故障，正文没有落库，重试安全。
+                // 走独立的宽松预算，不占用数据库里的一次性自动处理额度。
+                const modelOutputFailure = isModelOutputFailure(error);
                 const canOfferGovernedRetry = !(error instanceof ChapterContentPersistenceError)
                   && isAutopilotMode
-                  && chapterRetryCountUsed < chapterRetryBudget;
+                  && (modelOutputFailure
+                    ? modelOutputRetryCountUsed < MODEL_OUTPUT_RETRY_BUDGET
+                    : chapterRetryCountUsed < chapterRetryBudget);
                 const action = await applyGovernedIssue({
                   issueCode: error instanceof ChapterContentPersistenceError
                     ? "runtime.persistence_failed"
@@ -814,22 +838,31 @@ export class NovelPipelineExecutor {
                       : resolvePipelineRuntimeIssueCode(error),
                   stage: error instanceof ChapterContentPersistenceError
                     ? "chapter_persistence"
-                    : "chapter_generation",
+                    : (runtimePayload.directorNext && error instanceof ChapterArtifactSyncBoundaryError)
+                      ? "chapter_artifact_sync"
+                      : "chapter_generation",
                   summary: error instanceof ChapterContentPersistenceError
                     ? `第${chapter.order}章正文无法确认已保存，已停止自动重试。`
                     : message,
                   evidence: error instanceof Error ? error.stack : undefined,
                   chapterId: chapter.id,
                   chapterOrder: chapter.order,
-                  attempt: canOfferGovernedRetry
-                    ? chapterRetryCountUsed
-                    : issueGovernance?.policy.maxAutomaticRetries ?? chapterRetryCountUsed,
+                  attempt: modelOutputFailure
+                    ? (canOfferGovernedRetry ? modelOutputRetryCountUsed : MODEL_OUTPUT_RETRY_BUDGET)
+                    : (canOfferGovernedRetry
+                      ? chapterRetryCountUsed
+                      : issueGovernance?.policy.maxAutomaticRetries ?? chapterRetryCountUsed),
                   onRetry: canOfferGovernedRetry
                     ? async () => {
-                        if (!(await claimAttempt("runtime_retry"))) {
+                        if (modelOutputFailure) {
+                          modelOutputRetryCountUsed += 1;
+                          await this.updateJobRequired(jobId, { retryCount: totalRetryCount + modelOutputRetryCountUsed });
+                        } else if (!(await claimAttempt("runtime_retry"))) {
                           throw new Error("本章自动处理额度已被使用，请从保存位置继续处理。");
                         }
-                        const retryLabel = `第${chapter.order}章遇到临时问题，AI 正在自动修复并重试（${chapterRetryCountUsed}/${chapterRetryBudget}）`;
+                        const retryLabel = modelOutputFailure
+                          ? `第${chapter.order}章模型输出不可用，正在自动重试（${modelOutputRetryCountUsed}/${MODEL_OUTPUT_RETRY_BUDGET}）`
+                          : `第${chapter.order}章遇到临时问题，AI 正在自动修复并重试（${chapterRetryCountUsed}/${chapterRetryBudget}）`;
                         await this.updateJobRequired(jobId, {
                           heartbeatAt: new Date(),
                           currentStage: "generating_chapters",
@@ -853,9 +886,13 @@ export class NovelPipelineExecutor {
                   throw error;
                 }
                 if (!action) {
-                  if (!(await claimAttempt("runtime_retry"))) throw error;
+                  if (modelOutputFailure) {
+                    modelOutputRetryCountUsed += 1;
+                  } else if (!(await claimAttempt("runtime_retry"))) throw error;
                 }
-                const retryLabel = `第${chapter.order}章遇到临时问题，AI 正在自动修复并重试（${chapterRetryCountUsed}/${chapterRetryBudget}）`;
+                const retryLabel = modelOutputFailure
+                  ? `第${chapter.order}章模型输出不可用，正在自动重试（${modelOutputRetryCountUsed}/${MODEL_OUTPUT_RETRY_BUDGET}）`
+                  : `第${chapter.order}章遇到临时问题，AI 正在自动修复并重试（${chapterRetryCountUsed}/${chapterRetryBudget}）`;
                 if (!action) {
                   await this.updateJobSafe(jobId, {
                     heartbeatAt: new Date(),
@@ -869,7 +906,7 @@ export class NovelPipelineExecutor {
                   novelId,
                   chapterId: chapter.id,
                   chapterOrder: chapter.order,
-                  retry: chapterRetryCountUsed,
+                  retry: modelOutputFailure ? modelOutputRetryCountUsed : chapterRetryCountUsed,
                   error: error instanceof Error ? error.message : String(error),
                 });
               }
@@ -881,7 +918,7 @@ export class NovelPipelineExecutor {
             throw new Error(`第${chapter.order}章在自动重试后仍未生成可用结果。`);
           }
 
-          totalRetryCount += Math.max(0, chapterRetryCountUsed - previouslyConsumed);
+          totalRetryCount += Math.max(0, chapterRetryCountUsed - previouslyConsumed) + modelOutputRetryCountUsed;
           const closure = await applyChapterQualityClosure({
             governance: issueGovernance,
             workflowTaskId: runtimePayload.workflowTaskId,
