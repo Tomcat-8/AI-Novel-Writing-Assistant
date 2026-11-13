@@ -14,6 +14,14 @@ const nsisUtilPatched =
 const appFileCopierOriginal = 'const pmApproaches = [await packager.getPackageManager(), node_module_collector_1.PM.TRAVERSAL];';
 const appFileCopierPatched =
   'const pmApproaches = process.env.AI_NOVEL_EB_FORCE_TRAVERSAL === "true" ? [node_module_collector_1.PM.TRAVERSAL] : [await packager.getPackageManager(), node_module_collector_1.PM.TRAVERSAL];';
+// app-builder (Go 二进制) 解压 winCodeSign 时会带上 `-snld`，7-Zip 21.07 会尝试创建
+// darwin/10.12/lib 下的符号链接（libssl.dylib / libcrypto.dylib）。Windows 未开开发者模式
+// 且会话非管理员时 CreateSymbolicLink 失败 → 7za 退出码 2 → 整个打包被判失败
+// （其余文件其实都已解出，只有这 2 个符号链接失败）。
+// `-snl-` 会跳过符号链接处理，7za 返回 0，Windows 构建所需的
+// rcedit-x64.exe / signtool.exe / appxAssets 均完好。两者同为 5 字符，可等长原地替换。
+const SEVEN_ZIP_SYMLINK_FLAG_OLD = Buffer.from("-snld");
+const SEVEN_ZIP_SYMLINK_FLAG_NEW = Buffer.from("-snl-");
 const electronBuilderPackageJson = require.resolve("electron-builder/package.json", { paths: [desktopDir, repoRoot] });
 const electronBuilderRequire = createRequire(electronBuilderPackageJson);
 
@@ -60,6 +68,90 @@ function ensurePatchedElectronBuilder(isWindowsTarget) {
     appFileCopierPatched,
     "app file copier",
   );
+}
+
+/**
+ * 定位 app-builder (Go 二进制) 的可执行文件。
+ * app-builder-bin 是 builder-util 的依赖（pnpm 严格模式下顶层不可见），
+ * 先按包名解析，失败再直接扫 node_modules/.pnpm 目录。
+ */
+function locateAppBuilderExecutables() {
+  const found = new Set();
+  const tryResolve = (request, basePaths) => {
+    try {
+      return require.resolve(request, { paths: basePaths });
+    } catch {
+      return null;
+    }
+  };
+
+  let packageJsonPath = tryResolve("app-builder-bin/package.json", [desktopDir, repoRoot]);
+  if (!packageJsonPath) {
+    const builderUtilPkg = tryResolve("builder-util/package.json", [desktopDir, repoRoot]);
+    if (builderUtilPkg) {
+      try {
+        packageJsonPath = createRequire(builderUtilPkg).resolve("app-builder-bin/package.json");
+      } catch {
+        packageJsonPath = null;
+      }
+    }
+  }
+  if (packageJsonPath) {
+    const packageRoot = path.dirname(packageJsonPath);
+    for (const relative of ["win/x64/app-builder.exe", "win/ia32/app-builder.exe", "win/arm64/app-builder.exe"]) {
+      const target = path.join(packageRoot, relative);
+      if (fs.existsSync(target)) found.add(target);
+    }
+  }
+
+  // 兜底：直接扫 pnpm store
+  const pnpmDir = path.join(repoRoot, "node_modules", ".pnpm");
+  if (fs.existsSync(pnpmDir)) {
+    for (const entry of fs.readdirSync(pnpmDir)) {
+      if (!entry.startsWith("app-builder-bin@")) continue;
+      const packageRoot = path.join(pnpmDir, entry, "node_modules", "app-builder-bin");
+      for (const relative of ["win/x64/app-builder.exe", "win/ia32/app-builder.exe", "win/arm64/app-builder.exe"]) {
+        const target = path.join(packageRoot, relative);
+        if (fs.existsSync(target)) found.add(target);
+      }
+    }
+  }
+
+  return [...found];
+}
+
+/**
+ * 原地修补 app-builder 二进制里的 7za 符号链接开关（`-snld` → `-snl-`）。
+ * 详见文件头常量处的说明。幂等：已替换过则直接跳过。
+ */
+function patchAppBuilderSymlinkFlag() {
+  const targets = locateAppBuilderExecutables();
+  if (!targets.length) {
+    console.log("[dist:desktop] 未找到 app-builder 二进制，跳过 7za 符号链接开关修补");
+    return;
+  }
+  const oldFlag = SEVEN_ZIP_SYMLINK_FLAG_OLD.toString("latin1");
+  const newFlag = SEVEN_ZIP_SYMLINK_FLAG_NEW.toString("latin1");
+  let patched = 0;
+  for (const target of targets) {
+    const data = fs.readFileSync(target);
+    let count = 0;
+    let index = data.indexOf(SEVEN_ZIP_SYMLINK_FLAG_OLD);
+    while (index >= 0) {
+      count += 1;
+      index = data.indexOf(SEVEN_ZIP_SYMLINK_FLAG_OLD, index + 1);
+    }
+    if (!count) continue;
+    const backup = `${target}.bak-snld`;
+    if (!fs.existsSync(backup)) fs.copyFileSync(target, backup);
+    const patchedBuffer = Buffer.from(data.toString("latin1").split(oldFlag).join(newFlag), "latin1");
+    fs.writeFileSync(target, patchedBuffer);
+    console.log(`[dist:desktop] 已修补 ${path.basename(path.dirname(target))}/app-builder.exe 的 7za 符号链接开关（${count} 处）`);
+    patched += 1;
+  }
+  if (!patched) {
+    console.log("[dist:desktop] 7za 符号链接开关无需修补");
+  }
 }
 
 function resolveShortNsisTemplateDir() {
@@ -161,6 +253,7 @@ function main() {
     require("../../scripts/desktop-release/guard.cjs").verifyUpload(repoRoot, { env, forceTests });
   }
   ensurePatchedElectronBuilder(isWindowsTarget);
+  if (isWindowsTarget) patchAppBuilderSymlinkFlag();
   const shortNsisTemplatesDir = isWindowsTarget ? resolveShortNsisTemplateDir() : undefined;
 
   if (shortNsisTemplatesDir) console.log(`[dist:desktop] using NSIS templates from ${shortNsisTemplatesDir}`);
