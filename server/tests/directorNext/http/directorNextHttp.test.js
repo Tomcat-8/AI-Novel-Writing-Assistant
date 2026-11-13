@@ -4,6 +4,9 @@ const express = require("express");
 const { once } = require("node:events");
 const { mountDirectorNext } = require("../../../dist/modules/director/http");
 const { errorHandler } = require("../../../dist/middleware/errorHandler");
+// 本地补丁把章节额度天花板从「默认 10 万 / 上限 1000 万」提到「默认 100 万 / 上限 10 亿」，
+// 需要触顶/越界的用例一律从 shared 常量派生，不再写死数字。
+const {DEFAULT_DIRECTOR_CHAPTER_TOKEN_LIMIT,MAX_DIRECTOR_CHAPTER_TOKEN_LIMIT}=require('@ai-novel/shared/types/director/chapterBudget');
 
 async function withServer(deps, run) {
   const app = express();
@@ -45,7 +48,7 @@ test('resume accepts an explicit scoped budget grant and rejects invalid or weig
   const post=value=>fetch(base+'/api/director-next/commands',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)});
   assert.equal((await post(body)).status,202);
   assert.deepEqual(received,[body]);
-  for(const change of [{tokenLimit:0},{tokenLimit:122000.5},{tokenLimit:10000001},{metric:'output_weight_2'},{chapterId:''}]){
+  for(const change of [{tokenLimit:0},{tokenLimit:122000.5},{tokenLimit:MAX_DIRECTOR_CHAPTER_TOKEN_LIMIT+1},{metric:'output_weight_2'},{chapterId:''}]){
    assert.equal((await post({...body,chapterBudget:{...body.chapterBudget,...change}})).status,400);
   }
   assert.equal(received.length,1);
@@ -84,7 +87,7 @@ test('new run requests keep an explicit chapter budget and reject unusable value
   const post=value=>fetch(base+'/api/director-next/commands',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)});
   assert.equal((await post(body)).status,202);
   assert.equal(received[0].launchInput.chapterTokenLimit,200000);
-  for(const chapterTokenLimit of [0,16000,10000001,20000.5,'200000',null]) {
+  for(const chapterTokenLimit of [0,16000,MAX_DIRECTOR_CHAPTER_TOKEN_LIMIT+1,20000.5,'200000',null]) {
    assert.equal((await post({...body,launchInput:{...body.launchInput,chapterTokenLimit}})).status,400);
   }
   assert.equal(received.length,1);

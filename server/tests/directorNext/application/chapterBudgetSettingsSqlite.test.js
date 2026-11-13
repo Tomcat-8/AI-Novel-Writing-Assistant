@@ -16,6 +16,9 @@ const {PrismaRunRepository}=require(path.join(server,'dist/modules/director/infr
 const {registerChapterBudgetSettingsRoutes}=require(path.join(server,'dist/routes/settings/chapterBudgetRoutes'));
 const express=require(path.join(server,'node_modules/express'));
 const {once}=require('node:events');
+const {createRequire}=require('node:module');
+const sharedRequire=createRequire(path.join(server,'package.json'));
+const {DEFAULT_DIRECTOR_CHAPTER_TOKEN_LIMIT,MAX_DIRECTOR_CHAPTER_TOKEN_LIMIT}=sharedRequire('@ai-novel/shared/types/director/chapterBudget');
 const {errorHandler}=require(path.join(server,'dist/middleware/errorHandler'));
 const options=createDirectorProductionOptions(),runs=new PrismaRunRepository(prisma);
 const launchInput={storyInput:'预算测试',estimatedChapterCount:3,worldMode:'skip',targetMode:'opening',provider:'openai',model:'no-model-calls',executionRange:{from:1,to:3}};
@@ -26,18 +29,18 @@ async function prepare(runId,chapterTokenLimit,novelId='book') {
 (async()=>{
  if(process.argv[2]==='create'){
   await ensureRuntimeDatabaseReady();
-  assert.deepEqual(await getDirectorChapterBudgetSettings(),{tokenLimit:100000});
+  assert.deepEqual(await getDirectorChapterBudgetSettings(),{tokenLimit:DEFAULT_DIRECTOR_CHAPTER_TOKEN_LIMIT});
   await prisma.novel.create({data:{id:'book',title:'预算设置测试',directorVersion:'v2'}});
   await prisma.novel.create({data:{id:'book-explicit',title:'独立任务预算',directorVersion:'v2'}});
-  for(const tokenLimit of [0,16000,10000001,20000.5,'200000',null]) {
+  for(const tokenLimit of [0,16000,MAX_DIRECTOR_CHAPTER_TOKEN_LIMIT+1,20000.5,'200000',null]) {
    await assert.rejects(()=>saveDirectorChapterBudgetSettings({tokenLimit}));
   }
-  assert.deepEqual(await getDirectorChapterBudgetSettings(),{tokenLimit:100000});
+  assert.deepEqual(await getDirectorChapterBudgetSettings(),{tokenLimit:DEFAULT_DIRECTOR_CHAPTER_TOKEN_LIMIT});
   const app=express();app.use(express.json());registerChapterBudgetSettingsRoutes(app);app.use(errorHandler);
   const listener=app.listen(0,'127.0.0.1');await once(listener,'listening');
   const url='http://127.0.0.1:'+listener.address().port+'/auto-director/chapter-budget';
   try {
-   assert.deepEqual((await (await fetch(url)).json()).data,{tokenLimit:100000});
+   assert.deepEqual((await (await fetch(url)).json()).data,{tokenLimit:DEFAULT_DIRECTOR_CHAPTER_TOKEN_LIMIT});
    const put=body=>fetch(url,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
    assert.equal((await put({tokenLimit:16000})).status,400);
    assert.equal((await put({tokenLimit:200000,unknown:true})).status,400);

@@ -27,7 +27,7 @@ const command={type:'resume',runId:'run',expectedVersion:2,idempotencyKey:'grant
   await prisma.chapter.create({data:{id:'c3',novelId:'book',order:3,title:'第三章',content:'用户保存的正文'}});
   const snapshot={runId:'run',decisions:[{issueCode:'runtime.token_budget_exceeded',chapterOrder:3,action:'pause_for_manual',
    reason:'预检暂停',locked:true,policySource:'safety',retryExhaustedAction:'pause_for_manual'}],
-   chapterUsage:[{chapterId:'c3',chapterOrder:3,startJobTokens:50000,totalTokens:89892,budgetPause:{reserveTokens:16000,stage:'review'}}]};
+   chapterUsage:[{chapterId:'c3',chapterOrder:3,startJobTokens:50000,totalTokens:89892,tokenLimit:100000,budgetPause:{reserveTokens:16000,stage:'review'}}]};
   await prisma.generationJob.create({data:{id:'job',novelId:'book',startOrder:3,endOrder:3,status:'queued',pendingManualRecovery:true,
    retryCount:1,totalTokens:142892,promptTokens:113000,completionTokens:29892,payload:JSON.stringify({directorNext:snapshot})}});
   await runs.open(contract({runId:'run',novelId:'book',chapterRange:{from:3,to:3}}));

@@ -1,13 +1,17 @@
 const test=require('node:test');const assert=require('node:assert/strict');
 const {parsePipelineDirectorSnapshot}=require('../../../dist/services/novel/production/directorBridge');
+// 本地补丁把章节额度天花板从「默认 10 万 / 上限 1000 万」提到「默认 100 万 / 上限 10 亿」
+// （长篇连写时 10 万天花板会卡死章节）。这里一律从 shared 常量派生，不再写死数字，
+// 以后再调天花板测试会自动跟随。
+const {DEFAULT_DIRECTOR_CHAPTER_TOKEN_LIMIT,MAX_DIRECTOR_CHAPTER_TOKEN_LIMIT}=require('@ai-novel/shared/types/director/chapterBudget');
 
-test('100000-token budget allows the observed 86009-token chapter and stops exactly at the new boundary',()=>{
- const {beginChapterUsage,observeChapterUsage}=require('../../../dist/services/novel/production/usage');
+test('the observed 86009-token chapter stays inside the configured chapter budget and stops exactly at the new boundary',()=>{
+ const {beginChapterUsage,observeChapterUsage,DIRECTOR_CHAPTER_TOKEN_LIMIT}=require('../../../dist/services/novel/production/usage');
  const snapshot={runId:'new-run',decisions:[]};
  beginChapterUsage(snapshot,'c16',16,165911);
  assert.deepEqual(observeChapterUsage(snapshot,'c16',251920),{totalTokens:86009,exceeded:false});
- assert.equal(observeChapterUsage(snapshot,'c16',165911+99999).exceeded,false);
- assert.equal(observeChapterUsage(snapshot,'c16',165911+100000).exceeded,true);
+ assert.equal(observeChapterUsage(snapshot,'c16',165911+DIRECTOR_CHAPTER_TOKEN_LIMIT-1).exceeded,false);
+ assert.equal(observeChapterUsage(snapshot,'c16',165911+DIRECTOR_CHAPTER_TOKEN_LIMIT).exceeded,true);
 });
 test('chapter usage checkpoints survive serialization and reject impossible counts',()=>{
  const snapshot={runId:'new-run',decisions:[],chapterUsage:[{chapterId:'c1',chapterOrder:1,startJobTokens:100,totalTokens:80000}]};
@@ -95,12 +99,12 @@ test('effective accounting rejects cache rollback and impossible cache counts',(
  assert.throws(()=>beginChapterUsage({runId:'x',decisions:[]},'c1',1,counters(100,80,20,81)),/计数/);
 });
 test('provider total-only usage remains charged conservatively instead of creating free budget',()=>{
- const {beginChapterUsage,observeChapterUsage}=require('../../../dist/services/novel/production/usage');
+ const {beginChapterUsage,observeChapterUsage,DIRECTOR_CHAPTER_TOKEN_LIMIT}=require('../../../dist/services/novel/production/usage');
  const snapshot={runId:'partial-run',decisions:[]};
  beginChapterUsage(snapshot,'c1',1,counters(0,0,0,0));
- const observed=observeChapterUsage(snapshot,'c1',counters(100001,0,0,0));
- assert.equal(observed.exceeded,true);assert.equal(snapshot.chapterUsage[0].effectiveTokens,100001);
- assert.equal(snapshot.chapterUsage[0].unclassifiedTokens,100001);
+ const observed=observeChapterUsage(snapshot,'c1',counters(DIRECTOR_CHAPTER_TOKEN_LIMIT+1,0,0,0));
+ assert.equal(observed.exceeded,true);assert.equal(snapshot.chapterUsage[0].effectiveTokens,DIRECTOR_CHAPTER_TOKEN_LIMIT+1);
+ assert.equal(snapshot.chapterUsage[0].unclassifiedTokens,DIRECTOR_CHAPTER_TOKEN_LIMIT+1);
  assert.deepEqual(parsePipelineDirectorSnapshot(snapshot),snapshot);
 });
 test('budget authorization covers the next step without resetting consumed usage or other chapters',()=>{
@@ -146,7 +150,7 @@ test('extending the remaining task keeps completed chapters and applies to futur
  const snapshot={runId:'custom-run',chapterTokenLimit:100000,
   decisions:[{issueCode:'runtime.token_budget_exceeded',chapterOrder:3,action:'pause_for_manual'}],
   chapterUsage:[{chapterId:'c2',chapterOrder:2,startJobTokens:0,totalTokens:50000,endJobTokens:50000,tokenLimit:100000},
-   {chapterId:'c3',chapterOrder:3,startJobTokens:50000,totalTokens:92000,budgetPause:{reserveTokens:16000,stage:'repair'}}]};
+   {chapterId:'c3',chapterOrder:3,startJobTokens:50000,totalTokens:92000,tokenLimit:100000,budgetPause:{reserveTokens:16000,stage:'repair'}}]};
  const completed=structuredClone(snapshot.chapterUsage[0]);
  authorizeChapterBudget(snapshot,'job',{jobId:'job',chapterId:'c3',metric:'raw_tokens_v1',tokenLimit:180000,applyToRemaining:true});
  assert.equal(snapshot.chapterTokenLimit,180000);
@@ -159,16 +163,16 @@ test('extending the remaining task keeps completed chapters and applies to futur
 test('a one-chapter extension leaves the task default and old chapter limits intact',()=>{
  const {authorizeChapterBudget,beginChapterUsage}=require('../../../dist/services/novel/production/usage');
  const snapshot={runId:'legacy-run',decisions:[{issueCode:'runtime.token_budget_exceeded',chapterOrder:3,action:'pause_for_manual'}],
-  chapterUsage:[{chapterId:'c3',chapterOrder:3,startJobTokens:0,totalTokens:92000}]};
+  chapterUsage:[{chapterId:'c3',chapterOrder:3,startJobTokens:0,totalTokens:92000,tokenLimit:100000}]};
  authorizeChapterBudget(snapshot,'job',{jobId:'job',chapterId:'c3',metric:'raw_tokens_v1',tokenLimit:180000});
  assert.equal(snapshot.chapterTokenLimit,undefined);
  beginChapterUsage(snapshot,'c4',4,92000);
- assert.equal(snapshot.chapterUsage[1].tokenLimit,100000);
+ assert.equal(snapshot.chapterUsage[1].tokenLimit,DEFAULT_DIRECTOR_CHAPTER_TOKEN_LIMIT);
  assert.equal(snapshot.chapterUsage[0].tokenLimit,180000);
 });
 
 test('malformed saved task limits are rejected instead of dropping budget protection',()=>{
- for(const value of [0,-1,16000,20000.5,10000001,'200000',null]) {
+ for(const value of [0,-1,16000,20000.5,MAX_DIRECTOR_CHAPTER_TOKEN_LIMIT+1,'200000',null]) {
   assert.throws(()=>parsePipelineDirectorSnapshot({runId:'run',decisions:[],chapterTokenLimit:value}),/invalid director/);
  }
 });
