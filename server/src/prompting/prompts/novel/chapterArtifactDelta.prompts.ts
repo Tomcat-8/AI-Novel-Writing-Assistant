@@ -979,6 +979,7 @@ const CHAPTER_ARTIFACT_DELTA_EXAMPLE = {
     },
   ],
   relationDynamics: [],
+  characterLocationDeltas: [],
   factionUpdates: [],
   characterCandidates: [],
   characterKnowledgeStates: [
